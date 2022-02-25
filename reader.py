@@ -7,6 +7,7 @@ import scipy
 import numpy as np
 
 from scipy.io import wavfile
+from wave import open as open_wave
 import pydub 
 
 import matplotlib.pyplot as plt
@@ -34,7 +35,7 @@ def read_wave(filename):
         ys = ys[:, 0]
 
     # ts = np.arange(len(ys)) / framerate
-    wave = Wave(ys, framerate=framerate)
+    wave = Wave(ys, framerate=framerate, filename=filename)
     wave.normalize()
     return wave
 
@@ -46,7 +47,7 @@ def read_mp3(f):
         ys = ys.reshape((-1, 2))
         ys = ys[:, 0]
     
-    wave = Wave(ys, framerate=a.frame_rate)
+    wave = Wave(ys, framerate=a.frame_rate, filename=f)
     wave.normalize()
     return wave
 
@@ -159,12 +160,23 @@ def zero_pad(array, n):
     res[: len(array)] = array
     return res
 
+def rest(duration):
+    """Makes a rest of the given duration.
+
+    duration: float seconds
+
+    returns: Wave
+    """
+    signal = SilentSignal()
+    wave = signal.make_wave(duration)
+    return wave
+
 class Wave:
     """Represents a discrete-time waveform.
 
     """
 
-    def __init__(self, ys, ts=None, framerate=None):
+    def __init__(self, ys, ts=None, framerate=None, filename=None):
         """Initializes the wave.
 
         ys: wave array
@@ -173,6 +185,7 @@ class Wave:
         """
         self.ys = np.asanyarray(ys)
         self.framerate = framerate if framerate is not None else 11025
+        self.filename = filename
 
         if ts is None:
             self.ts = np.arange(len(ys)) / self.framerate
@@ -522,16 +535,166 @@ class Wave:
 
         return res
 
-    def play(self, filename="sound.wav"):
+    def play(self):
         """Plays a wave file.
 
         filename: string
         """
-        self.write(filename)
-        play_wave(filename)
+        self.write(self.filename)
+        play_wave(self.filename)
+        
+    def write(self, filename="sound.wav"):
+        """Write a wave file.
+
+        filename: string
+        """
+        print("Writing", filename)
+        wfile = WavFileWriter(filename, self.framerate)
+        wfile.write(self)
+        wfile.close()
 
     def make_audio(self):
         """Makes an IPython Audio object.
         """
         audio = Audio(data=self.ys.real, rate=self.framerate)
         return audio
+    
+class WavFileWriter:
+    """Writes wav files."""
+
+    def __init__(self, filename="sound.wav", framerate=11025):
+        """Opens the file and sets parameters.
+
+        filename: string
+        framerate: samples per second
+        """
+        self.filename = filename
+        self.framerate = framerate
+        self.nchannels = 1
+        self.sampwidth = 2
+        self.bits = self.sampwidth * 8
+        self.bound = 2 ** (self.bits - 1) - 1
+
+        self.fmt = "h"
+        self.dtype = np.int16
+
+        self.fp = open_wave(self.filename, "w")
+        self.fp.setnchannels(self.nchannels)
+        self.fp.setsampwidth(self.sampwidth)
+        self.fp.setframerate(self.framerate)
+
+    def write(self, wave):
+        """Writes a wave.
+
+        wave: Wave
+        """
+        zs = wave.quantize(self.bound, self.dtype)
+        self.fp.writeframes(zs.tostring())
+
+    def close(self, duration=0):
+        """Closes the file.
+
+        duration: how many seconds of silence to append
+        """
+        if duration:
+            self.write(rest(duration))
+
+        self.fp.close()
+        
+class Signal:
+    """Represents a time-varying signal."""
+
+    def __add__(self, other):
+        """Adds two signals.
+
+        other: Signal
+
+        returns: Signal
+        """
+        if other == 0:
+            return self
+        return SumSignal(self, other)
+
+    __radd__ = __add__
+
+    @property
+    def period(self):
+        """Period of the signal in seconds (property).
+
+        Since this is used primarily for purposes of plotting,
+        the default behavior is to return a value, 0.1 seconds,
+        that is reasonable for many signals.
+
+        returns: float seconds
+        """
+        return 0.1
+
+    def plot(self, framerate=11025):
+        """Plots the signal.
+
+        The default behavior is to plot three periods.
+
+        framerate: samples per second
+        """
+        duration = self.period * 3
+        wave = self.make_wave(duration, start=0, framerate=framerate)
+        wave.plot()
+
+    def make_wave(self, duration=1, start=0, framerate=11025):
+        """Makes a Wave object.
+
+        duration: float seconds
+        start: float seconds
+        framerate: int frames per second
+
+        returns: Wave
+        """
+        n = round(duration * framerate)
+        ts = start + np.arange(n) / framerate
+        ys = self.evaluate(ts)
+        return Wave(ys, ts, framerate=framerate)
+    
+class SumSignal(Signal):
+    """Represents the sum of signals."""
+
+    def __init__(self, *args):
+        """Initializes the sum.
+
+        args: tuple of signals
+        """
+        self.signals = args
+
+    @property
+    def period(self):
+        """Period of the signal in seconds.
+
+        Note: this is not correct; it's mostly a placekeeper.
+
+        But it is correct for a harmonic sequence where all
+        component frequencies are multiples of the fundamental.
+
+        returns: float seconds
+        """
+        return max(sig.period for sig in self.signals)
+
+    def evaluate(self, ts):
+        """Evaluates the signal at the given times.
+
+        ts: float array of times
+
+        returns: float wave array
+        """
+        ts = np.asarray(ts)
+        return sum(sig.evaluate(ts) for sig in self.signals)
+    
+class SilentSignal(Signal):
+    """Represents silence."""
+
+    def evaluate(self, ts):
+        """Evaluates the signal at the given times.
+
+        ts: float array of times
+
+        returns: float wave array
+        """
+        return np.zeros(len(ts))
